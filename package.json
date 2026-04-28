@@ -7,7 +7,7 @@
   "author": "July",
   "repository": {
     "type": "git",
-    "url": "https://github.com/july/pi-english-polisher"
+    "url": "https://github.com/LCorleone/pi-english-polisher"
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",

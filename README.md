@@ -22,13 +22,13 @@ The extension will:
 ## Install
 
 ```bash
-pi install git:github.com/<your-user>/pi-english-polisher
+pi install git:github.com/LCorleone/pi-english-polisher
 ```
 
 Or try without installing:
 
 ```bash
-pi -e git:github.com/<your-user>/pi-english-polisher
+pi -e git:github.com/LCorleone/pi-english-polisher
 ```
 
 ## Usage
@@ -52,7 +52,7 @@ No configuration needed. The extension uses your current session's model and API
 ## Uninstall
 
 ```bash
-pi remove git:github.com/<your-user>/pi-english-polisher
+pi remove git:github.com/LCorleone/pi-english-polisher
 ```
 
 ## License
