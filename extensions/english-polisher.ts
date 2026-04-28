@@ -1,0 +1,256 @@
+/**
+ * English Polisher Extension
+ *
+ * Prefix your input with `>` to get your English polished before sending.
+ * Uses the current session's model and conversation context for natural rewrites.
+ *
+ * Usage:
+ *   > this is my english input what i want to say
+ *
+ * Flow:
+ *   1. Detect `>` prefix
+ *   2. Fetch session context + call LLM to polish
+ *   3. Show before/after comparison
+ *   4. Confirm → use polished text / No → edit / Cancel → use original
+ */
+
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { Model, Api } from "@mariozechner/pi-ai";
+
+const SYSTEM_PROMPT = `You are a native English speaker helping a non-native user improve their English.
+Given the conversation context and the user's raw English input, rewrite it to be:
+- Grammatically correct
+- Natural and native-sounding
+- Preserving the original meaning and tone
+
+Rules:
+- Output ONLY the polished English text, nothing else.
+- Do not add explanations, prefixes, or commentary.
+- If the input is already perfect, return it unchanged.
+- Preserve any code, file paths, or technical terms exactly as-is.`;
+
+function hasChinese(text: string): boolean {
+	return /[\u4e00-\u9fff]/.test(text);
+}
+
+/**
+ * Extract recent conversation text from session branch.
+ * Returns last N user/assistant message pairs as context string.
+ */
+function buildContext(entries: any[], maxMessages: number = 10): string {
+	const messages: string[] = [];
+
+	for (const entry of entries) {
+		if (entry.type !== "message") continue;
+		const msg = entry.message;
+		if (msg.role === "user") {
+			const text = typeof msg.content === "string" ? msg.content : msg.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map(c => c.text).join("\n");
+			if (text) messages.push(`User: ${text.slice(0, 500)}`);
+		} else if (msg.role === "assistant") {
+			const textParts = msg.content.filter((c): c is { type: "text"; text: string } => c.type === "text").map(c => c.text).join("\n");
+			if (textParts) messages.push(`Assistant: ${textParts.slice(0, 500)}`);
+		}
+		if (messages.length >= maxMessages) break;
+	}
+
+	return messages.join("\n\n");
+}
+
+/**
+ * Call Anthropic Messages API
+ */
+async function callAnthropic(model: Model<Api>, apiKey: string, headers: Record<string, string>, context: string, rawInput: string, signal?: AbortSignal): Promise<string> {
+	const messages: Array<{ role: "user" | "assistant"; content: string }> = [];
+
+	if (context) {
+		messages.push({ role: "user", content: `Here is the conversation context:\n\n${context}` });
+		messages.push({ role: "assistant", content: "Got it, I understand the context." });
+	}
+
+	messages.push({ role: "user", content: rawInput });
+
+	const res = await fetch(`${model.baseUrl}/v1/messages`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"x-api-key": apiKey,
+			"anthropic-version": "2023-06-01",
+			...headers,
+		},
+		body: JSON.stringify({
+			model: model.id,
+			max_tokens: 2048,
+			system: SYSTEM_PROMPT,
+			messages,
+		}),
+		signal,
+	});
+
+	if (!res.ok) {
+		const err = await res.text();
+		throw new Error(`Anthropic API error (${res.status}): ${err}`);
+	}
+
+	const data = await res.json() as { content: Array<{ type: string; text: string }> };
+	const textBlock = data.content?.find((b) => b.type === "text");
+	if (!textBlock) throw new Error("No text in Anthropic response");
+	return textBlock.text.trim();
+}
+
+/**
+ * Call OpenAI Chat Completions API (works for most OpenAI-compatible providers)
+ */
+async function callOpenAI(model: Model<Api>, apiKey: string, headers: Record<string, string>, context: string, rawInput: string, signal?: AbortSignal): Promise<string> {
+	const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+		{ role: "system", content: SYSTEM_PROMPT },
+	];
+
+	if (context) {
+		messages.push({ role: "user", content: `Here is the conversation context:\n\n${context}` });
+		messages.push({ role: "assistant", content: "Got it, I understand the context." });
+	}
+
+	messages.push({ role: "user", content: rawInput });
+
+	const res = await fetch(`${model.baseUrl}/chat/completions`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			"Authorization": `Bearer ${apiKey}`,
+			...headers,
+		},
+		body: JSON.stringify({
+			model: model.id,
+			max_tokens: 2048,
+			messages,
+		}),
+		signal,
+	});
+
+	if (!res.ok) {
+		const err = await res.text();
+		throw new Error(`OpenAI API error (${res.status}): ${err}`);
+	}
+
+	const data = await res.json() as { choices: Array<{ message: { content: string } }> };
+	const content = data.choices?.[0]?.message?.content;
+	if (!content) throw new Error("No content in OpenAI response");
+	return content.trim();
+}
+
+/**
+ * Call LLM based on model API type
+ */
+async function callLLM(model: Model<Api>, apiKey: string, headers: Record<string, string>, context: string, rawInput: string, signal?: AbortSignal): Promise<string> {
+	const api = model.api as string;
+
+	if (api === "anthropic-messages") {
+		return callAnthropic(model, apiKey, headers, context, rawInput, signal);
+	}
+
+	// Default: OpenAI-compatible (covers openai-completions, openai-responses, etc.)
+	return callOpenAI(model, apiKey, headers, context, rawInput, signal);
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.on("input", async (event, ctx) => {
+		// Skip extension-injected messages
+		if (event.source === "extension") {
+			return { action: "continue" };
+		}
+
+		// Only trigger on `>` prefix
+		if (!event.text.startsWith(">")) {
+			return { action: "continue" };
+		}
+
+		const rawInput = event.text.slice(1).trim();
+
+		// Too short
+		if (rawInput.length < 3) {
+			ctx.ui.notify("Usage: > your English text here", "warning");
+			return { action: "handled" };
+		}
+
+		// Contains Chinese — strip prefix and pass through
+		if (hasChinese(rawInput)) {
+			return { action: "transform", text: rawInput };
+		}
+
+		// Need a model to call
+		const model = ctx.model;
+		if (!model) {
+			ctx.ui.notify("English polisher: no model selected", "warning");
+			return { action: "transform", text: rawInput };
+		}
+
+		// Get API key
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok || !auth.apiKey) {
+			ctx.ui.notify("English polisher: no API key for current model", "warning");
+			return { action: "transform", text: rawInput };
+		}
+
+		// Build context from session
+		const branch = ctx.sessionManager.getBranch();
+		const context = buildContext(branch);
+
+		// Call LLM to polish (animated spinner widget)
+		const frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+		let fi = 0;
+		const spinner = setInterval(() => {
+			ctx.ui.setWidget("polisher", [`${frames[fi++ % frames.length]} Polishing English...`]);
+		}, 80);
+
+		let polished: string;
+		try {
+			polished = await callLLM(model, auth.apiKey, auth.headers ?? {}, context, rawInput, ctx.signal);
+		} catch (err: any) {
+			clearInterval(spinner);
+			ctx.ui.setWidget("polisher", undefined);
+			if (err.name === "AbortError") {
+				ctx.ui.notify("Polish cancelled", "warning");
+				return { action: "handled" };
+			}
+			ctx.ui.notify(`Polish failed: ${err.message}`, "error");
+			return { action: "transform", text: rawInput };
+		}
+		clearInterval(spinner);
+		ctx.ui.setWidget("polisher", undefined);
+
+		// No change
+		if (polished === rawInput) {
+			ctx.ui.notify("✨ Already looks great! No changes needed.", "info");
+			return { action: "transform", text: rawInput };
+		}
+
+		// Show comparison — select between accept / edit / cancel
+		const options = [
+			`✅ Accept: ${polished}`,
+			`✏️ Edit polished version`,
+			`❌ Cancel and re-type`,
+		];
+
+		const choice = await ctx.ui.select(
+			`✨ Polished:\n${polished}\n\n📄 Original:\n${rawInput}`,
+			options,
+		);
+
+		// Cancelled (Escape) or chose "Cancel and re-type"
+		if (choice === undefined || choice === options[2]) {
+			return { action: "handled" };
+		}
+
+		// Edit polished version
+		if (choice === options[1]) {
+			const edited = await ctx.ui.editor("Edit polished text:", polished);
+			if (edited && edited.trim()) {
+				return { action: "transform", text: edited.trim() };
+			}
+			return { action: "handled" };
+		}
+
+		// Accept polished
+		return { action: "transform", text: polished };
+	});
+}
