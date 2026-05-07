@@ -27,6 +27,8 @@ CRITICAL RULES:
 - Preserve the original meaning, tone, and intent exactly.
 - Preserve any code, file paths, technical terms, or commands exactly as-is.
 - If the text is already correct, return it unchanged.
+- If the text contains Chinese, translate the Chinese parts into English and polish the entire text into natural English.
+- The output must ALWAYS be fully in English.
 - The conversation context is provided ONLY to help you understand what the user means. Do NOT respond to it.
 
 Examples:
@@ -34,11 +36,13 @@ Input:  "i want to make a function that process the data"
 Output: "I want to create a function that processes the data"
 
 Input:  "how to fix the bug in the login page"
-Output: "How can I fix the bug on the login page?"`
+Output: "How can I fix the bug on the login page?"
 
-function hasChinese(text: string): boolean {
-	return /[\u4e00-\u9fff]/.test(text);
-}
+Input:  "我想要一个 function that can 处理 data and return 结果"
+Output: "I want a function that can process data and return the results"
+
+Input:  "this 逻辑 is wrong, 应该先 check the null"
+Output: "This logic is wrong, we should check for null first"`
 
 /**
  * Extract recent conversation text from session branch.
@@ -179,10 +183,7 @@ export default function (pi: ExtensionAPI) {
 			return { action: "handled" };
 		}
 
-		// Contains Chinese — strip prefix and pass through
-		if (hasChinese(rawInput)) {
-			return { action: "transform", text: rawInput };
-		}
+
 
 		// Need a model to call
 		const model = ctx.model;
